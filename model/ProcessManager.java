@@ -15,11 +15,13 @@ public class ProcessManager {
         initialProcesses = new ArrayList<>();
         partitions = new ArrayList<>();
         executionLogs = new ArrayList<>();
+        
         internalPartitions = new ArrayList<>();
         condensations = new ArrayList<>();
     }
 
-    // ========== GESTIÓN DE PARTICIONES ==========
+
+
     
     public void addPartition(String name, long size) {
         Partition partition = new Partition(name, size);
@@ -183,7 +185,7 @@ public class ProcessManager {
                 );
             }
 
-            // Restar el tiempo realmente ejecutado (usar timeToExecute)
+            // Restar el tiempo realmente ejecutado
             currentProcess.subtractTime(timeToExecute);
             currentProcess.incrementCycle();
             
@@ -191,7 +193,7 @@ public class ProcessManager {
             if (currentProcess.isFinished()) {
                 addLog(currentProcess, Filter.FINALIZADO);
                 
-                // ← LIBERAR PARTICIÓN Y BUSCAR CONDENSACIÓN
+                // LIBERAR PARTICIÓN Y BUSCAR CONDENSACIÓN
                 int partitionIndex = findPartitionIndex(currentProcess.getPartition());
                 if (partitionIndex != -1) {
                     internalPartitions.get(partitionIndex).setAvailable(true);
@@ -201,27 +203,32 @@ public class ProcessManager {
                 continue;
             }
             
-            // No terminó: intentar mover a la primera partición libre en la que quepa
+            // No terminó: intentar mover a otra partición
             int oldPartitionIndex = findPartitionIndex(currentProcess.getPartition());
 
-            // Liberar la partición actual (crear hueco) antes de buscar una nueva (si existía)
+            // Liberar la partición actual (crear hueco) antes de buscar una nueva
             if (oldPartitionIndex != -1) {
                 Partition old = internalPartitions.get(oldPartitionIndex);
                 old.removeProcess(currentProcess);
                 old.setAvailable(true);
+                
+                // ← NUEVO: Revisar condensación INMEDIATAMENTE después de liberar
+                reviewForCondensation(oldPartitionIndex);
+                
+                // ← NUEVO: Actualizar el índice por si cambió después de la condensación
+                oldPartitionIndex = findPartitionIndex(old);
             }
 
-            // Buscar primera partición disponible donde quepa
+            // Buscar mejor ajuste (best-fit) donde quepa
             int fitIndex = findFirstFitIndex(currentProcess);
 
             if (fitIndex != -1) {
-                // Asignar en primer ajuste (first-fit). Esto puede crear un hueco si la partición es mayor.
+                // Asignar en mejor ajuste (best-fit)
                 allocateProcessToPartitionAtIndex(currentProcess, fitIndex);
-                // Asegurar que el proceso quede como no bloqueado
                 currentProcess.setStatus(Status.NO_BLOQUEADO);
                 addLog(currentProcess, Filter.TIEMPO_EXPIRADO);
             } else {
-                // No hay hueco disponible -> se fragmentó la memoria; marcar bloqueo
+                // No hay hueco disponible
                 currentProcess.setStatus(Status.BLOQUEADO);
                 addLog(currentProcess, Filter.TRANSICION_BLOQUEO);
                 addLog(currentProcess, Filter.BLOQUEADO);
@@ -232,16 +239,38 @@ public class ProcessManager {
         }
     }
 
-    // Buscar primer índice de partición libre donde quepa el proceso (first-fit)
+    // Buscar índice de partición libre más pequeña donde quepa el proceso (best-fit)
     private int findFirstFitIndex(Process process) {
         if (process == null) return -1;
+        
+        int bestIndex = -1;
+        long smallestSize = Long.MAX_VALUE;
+        
+        System.out.println("=== Buscando Best-Fit para " + process.getName() + " (tamaño " + process.getSize() + ") ===");
+        
         for (int i = 0; i < internalPartitions.size(); i++) {
             Partition part = internalPartitions.get(i);
+            
+            System.out.println("  Evaluando " + part.getName() + 
+                            " - Tamaño: " + part.getSize() + 
+                            " - Disponible: " + part.isAvailable());
+            
             if (part.isAvailable() && part.getSize() >= process.getSize()) {
-                return i;
+                if (part.getSize() < smallestSize) {
+                    smallestSize = part.getSize();
+                    bestIndex = i;
+                    System.out.println("    Nuevo mejor ajuste: " + part.getName());
+                }
             }
         }
-        return -1;
+        
+        if (bestIndex != -1) {
+            System.out.println("  → Seleccionado: " + internalPartitions.get(bestIndex).getName());
+        } else {
+            System.out.println("  → No se encontró partición disponible");
+        }
+        
+        return bestIndex;
     }
 
     // Asignar proceso a la partición en el índice dado. Si la partición es mayor se crea un hueco (split).
@@ -261,6 +290,7 @@ public class ProcessManager {
 
         // Si la partición es mayor, la dividimos en: partición asignada + hueco
         if (target.getSize() > process.getSize()) {
+            
             String allocatedName = "Part" + (partitions.size() + 1);
             Partition allocated = new Partition(allocatedName, process.getSize());
             allocated.setAvailable(false);
@@ -280,6 +310,10 @@ public class ProcessManager {
             // Mantener registro maestro de particiones (coherente con condensaciones previas)
             partitions.add(allocated);
             partitions.add(hole);
+            System.out.println("\n DIVISIÓN EJECUTADA:");
+            System.out.println("   " + target.getName() + "(" + target.getSize() + ") dividida en:");
+            System.out.println("   - " + allocatedName + "(" + process.getSize() + ") asignada a " + process.getName());
+            System.out.println("   - " + holeName + "(" + leftover + ") hueco libre");
         }
     }
 
@@ -300,19 +334,25 @@ public class ProcessManager {
         boolean upAvailable = false;
         boolean downAvailable = false;
         
+        System.out.println("\n Revisando condensación en posición " + position);
+        System.out.println("   Partición actual: " + internalPartitions.get(position).getName());
+        
         // ¿Partición de arriba está libre?
         if (position >= 1 && internalPartitions.get(position - 1).isAvailable()) {
             upAvailable = true;
+            System.out.println("    Partición arriba libre: " + internalPartitions.get(position - 1).getName());
         }
         
         // ¿Partición de abajo está libre?
         if (position < internalPartitions.size() - 1 && 
             internalPartitions.get(position + 1).isAvailable()) {
             downAvailable = true;
+            System.out.println("    Partición abajo libre: " + internalPartitions.get(position + 1).getName());
         }
         
         // Si no hay particiones adyacentes libres, no hacer nada
         if (!upAvailable && !downAvailable) {
+            System.out.println("    No hay particiones adyacentes libres");
             return;
         }
         
@@ -322,7 +362,12 @@ public class ProcessManager {
         String newPartitionName = "Part" + (partitions.size() + 1);
         
         if (upAvailable && downAvailable) {
-            //USIONAR 3 PARTICIONES
+            System.out.println("   CONDENSACIÓN 3: " + 
+                internalPartitions.get(position - 1).getName() + " + " +
+                internalPartitions.get(position).getName() + " + " +
+                internalPartitions.get(position + 1).getName() + 
+                " = " + newPartitionName);
+                
             condensation = new Condensation(
                 condensationName,
                 internalPartitions.get(position - 1),
@@ -336,13 +381,16 @@ public class ProcessManager {
             partitions.add(newPartition);
             condensations.add(condensation);
             
-            // Reemplazar en la lista interna
             internalPartitions.remove(position + 1);
             internalPartitions.remove(position);
             internalPartitions.set(position - 1, newPartition);
             
         } else if (upAvailable) {
-            //  FUSIONAR 2 (arriba + actual)
+            System.out.println("    CONDENSACIÓN 2: " + 
+                internalPartitions.get(position - 1).getName() + " + " +
+                internalPartitions.get(position).getName() + 
+                " = " + newPartitionName);
+                
             condensation = new Condensation(
                 condensationName,
                 internalPartitions.get(position - 1),
@@ -359,7 +407,11 @@ public class ProcessManager {
             internalPartitions.remove(position);
             
         } else if (downAvailable) {
-            //  FUSIONAR 2 (actual + abajo)
+            System.out.println("    CONDENSACIÓN 2: " + 
+                internalPartitions.get(position).getName() + " + " +
+                internalPartitions.get(position + 1).getName() + 
+                " = " + newPartitionName);
+                
             condensation = new Condensation(
                 condensationName,
                 internalPartitions.get(position),
@@ -375,6 +427,10 @@ public class ProcessManager {
             internalPartitions.set(position, newPartition);
             internalPartitions.remove(position + 1);
         }
+        
+        System.out.println("   Estado memoria después: " + internalPartitions.stream()
+            .map(p -> p.getName() + "(" + p.getSize() + "," + (p.isAvailable() ? "L" : "O") + ")")
+            .reduce((a, b) -> a + " " + b).orElse("vacío"));
     }
 
     // ← NUEVO: Obtener condensaciones
